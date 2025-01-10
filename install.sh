@@ -6,7 +6,7 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}DirectAdmin Telegram Bot Installer${NC}"
+echo -e "${RED}DirectAdmin Telegram Bot Uninstaller${NC}"
 echo "----------------------------------------"
 
 # Check if running as root
@@ -15,120 +15,64 @@ if [ "$EUID" -ne 0 ]; then
     exit
 fi
 
-# Install required packages
-echo -e "${GREEN}Installing required packages...${NC}"
-apt update
-apt install -y python3 python3-pip python3-venv git nginx certbot python3-certbot-nginx
+# Load environment variables if .env exists
+if [ -f /var/www/directadmin-bot/.env ]; then
+    export $(cat /var/www/directadmin-bot/.env | grep -v '^#' | xargs)
+fi
 
-# Create project directory
-echo -e "${GREEN}Creating project directory...${NC}"
-mkdir -p /var/www
-cd /var/www
+# Ask for confirmation
+echo -e "${RED}WARNING: This will completely remove the DirectAdmin Telegram Bot and all its data!${NC}"
+read -p "Are you sure you want to continue? (y/N) " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Uninstall cancelled."
+    exit 1
+fi
 
-# Clone repository
-echo -e "${GREEN}Cloning repository...${NC}"
-git clone https://github.com/Troniza/DirectAdmin-Sell-Telegram-Bot.git
-cd DirectAdmin-Sell-Telegram-Bot
+# Remove webhook
+if [ ! -z "$TELEGRAM_TOKEN" ]; then
+    echo -e "${BLUE}Removing Telegram webhook...${NC}"
+    curl "https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteWebhook"
+fi
 
-# Set permissions
-chown -R $SUDO_USER:$SUDO_USER /var/www/DirectAdmin-Sell-Telegram-Bot
+# Remove SSL certificates
+if [ ! -z "$DOMAIN" ]; then
+    echo -e "${BLUE}Removing SSL certificates...${NC}"
+    certbot delete --cert-name $DOMAIN --non-interactive
+fi
 
-# Create virtual environment
-echo -e "${GREEN}Creating virtual environment...${NC}"
-python3 -m venv venv
-source venv/bin/activate
+# Remove Nginx configuration
+echo -e "${BLUE}Removing Nginx configuration...${NC}"
+rm -f /etc/nginx/sites-enabled/directadmin-bot
+rm -f /etc/nginx/sites-available/directadmin-bot
+systemctl restart nginx
 
-# Install requirements
-echo -e "${GREEN}Installing requirements...${NC}"
-pip install -r requirements.txt
+# Drop database and user
+if [ ! -z "$DB_NAME" ] && [ ! -z "$DB_USER" ]; then
+    echo -e "${BLUE}Removing database and user...${NC}"
+    mysql -e "DROP DATABASE IF EXISTS ${DB_NAME};"
+    mysql -e "DROP USER IF EXISTS '${DB_USER}'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+fi
 
-# Create .env file
-echo -e "${GREEN}Setting up environment variables...${NC}"
-echo "Please provide the following information:"
+# Remove project directory
+echo -e "${BLUE}Removing project files...${NC}"
+rm -rf /var/www/directadmin-bot
 
-read -p "Enter Telegram Bot Token: " BOT_TOKEN
-read -p "Enter DirectAdmin URL (e.g., https://example.com:2222): " DA_URL
-read -p "Enter DirectAdmin Username: " DA_USERNAME
-read -p "Enter DirectAdmin Password: " DA_PASSWORD
-read -p "Enter ZarinPal Merchant ID: " MERCHANT_ID
-read -p "Enter Admin User ID (Telegram): " ADMIN_ID
-read -p "Enter Support Group ID (Telegram): " SUPPORT_GROUP
-read -p "Enter your domain for webhook (e.g., https://example.com): " WEBHOOK_URL
+echo -e "${GREEN}Uninstallation completed!${NC}"
+echo -e "${BLUE}The following changes were made:${NC}"
+echo "1. Removed Telegram webhook"
+echo "2. Removed SSL certificates"
+echo "3. Removed Nginx configuration"
+echo "4. Dropped database and database user"
+echo "5. Removed all project files"
 
-# Create .env file
-cat > .env << EOL
-TELEGRAM_TOKEN=$BOT_TOKEN
-DA_URL=$DA_URL
-DA_USERNAME=$DA_USERNAME
-DA_PASSWORD=$DA_PASSWORD
-ZARINPAL_MERCHANT_ID=$MERCHANT_ID
-ZARINPAL_SANDBOX=false
-ADMIN_USER_ID=$ADMIN_ID
-SUPPORT_GROUP_ID=$SUPPORT_GROUP
-WEBHOOK_URL=$WEBHOOK_URL/webhook
-WEBHOOK_PORT=8443
-EOL
-
-# Configure Nginx
-echo -e "${GREEN}Configuring Nginx...${NC}"
-cat > /etc/nginx/sites-available/directadmin-bot << EOL
-server {
-    listen 443 ssl;
-    server_name $WEBHOOK_URL;
-
-    ssl_certificate /etc/letsencrypt/live/$WEBHOOK_URL/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$WEBHOOK_URL/privkey.pem;
-
-    location /webhook {
-        proxy_pass http://127.0.0.1:8443;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-    }
-}
-EOL
-
-# Enable site and get SSL certificate
-ln -s /etc/nginx/sites-available/directadmin-bot /etc/nginx/sites-enabled/
-certbot --nginx -d $WEBHOOK_URL --non-interactive --agree-tos --email admin@$WEBHOOK_URL
-nginx -t && systemctl restart nginx
-
-# Create systemd service
-echo -e "${GREEN}Creating systemd service...${NC}"
-cat > /etc/systemd/system/directadmin-bot.service << EOL
-[Unit]
-Description=DirectAdmin Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=$SUDO_USER
-WorkingDirectory=/var/www/DirectAdmin-Sell-Telegram-Bot
-Environment=PATH=/var/www/DirectAdmin-Sell-Telegram-Bot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/var/www/DirectAdmin-Sell-Telegram-Bot/venv/bin/python bot.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
-# Setup firewall
-echo -e "${GREEN}Configuring firewall...${NC}"
-ufw allow 80
-ufw allow 443
-ufw --force enable
-
-# Start and enable service
-systemctl daemon-reload
-systemctl enable directadmin-bot
-systemctl start directadmin-bot
-
-echo -e "${GREEN}Installation completed!${NC}"
-echo -e "${BLUE}The bot is now running as a system service.${NC}"
-echo -e "${BLUE}You can check the status using: systemctl status directadmin-bot${NC}"
-echo -e "${BLUE}View logs using: journalctl -u directadmin-bot -f${NC}"
-
-# Show service status
-systemctl status directadmin-bot
+# Optional: Remove PHP and other dependencies
+read -p "Do you want to remove PHP and other installed dependencies? (y/N) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo -e "${BLUE}Removing PHP and dependencies...${NC}"
+    apt remove --purge -y php8.1-fpm php8.1-mysql php8.1-curl php8.1-mbstring php8.1-xml mariadb-server composer
+    apt autoremove -y
+    echo -e "${GREEN}Dependencies removed successfully!${NC}"
+fi
