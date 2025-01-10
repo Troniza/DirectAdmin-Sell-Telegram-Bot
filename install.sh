@@ -9,20 +9,29 @@ NC='\033[0m'
 echo -e "${BLUE}DirectAdmin Telegram Bot Installer${NC}"
 echo "----------------------------------------"
 
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}Please run as root${NC}"
+    exit
+fi
+
+# Install required packages
+echo -e "${GREEN}Installing required packages...${NC}"
+apt update
+apt install -y python3 python3-pip python3-venv git nginx certbot python3-certbot-nginx
+
 # Create project directory
-PROJECT_DIR="directadmin-tgbot"
-if [ ! -d "$PROJECT_DIR" ]; then
-    echo -e "${GREEN}Creating project directory...${NC}"
-    mkdir -p "$PROJECT_DIR"
-fi
+echo -e "${GREEN}Creating project directory...${NC}"
+mkdir -p /var/www
+cd /var/www
 
-cd "$PROJECT_DIR"
+# Clone repository
+echo -e "${GREEN}Cloning repository...${NC}"
+git clone https://github.com/Troniza/DirectAdmin-Sell-Telegram-Bot.git
+cd DirectAdmin-Sell-Telegram-Bot
 
-# Clone repository if not exists
-if [ ! -d ".git" ]; then
-    echo -e "${GREEN}Cloning repository...${NC}"
-    git clone https://github.com/YOUR_USERNAME/directadmin-tgbot.git .
-fi
+# Set permissions
+chown -R $SUDO_USER:$SUDO_USER /var/www/DirectAdmin-Sell-Telegram-Bot
 
 # Create virtual environment
 echo -e "${GREEN}Creating virtual environment...${NC}"
@@ -44,6 +53,7 @@ read -p "Enter DirectAdmin Password: " DA_PASSWORD
 read -p "Enter ZarinPal Merchant ID: " MERCHANT_ID
 read -p "Enter Admin User ID (Telegram): " ADMIN_ID
 read -p "Enter Support Group ID (Telegram): " SUPPORT_GROUP
+read -p "Enter your domain for webhook (e.g., https://example.com): " WEBHOOK_URL
 
 # Create .env file
 cat > .env << EOL
@@ -55,41 +65,70 @@ ZARINPAL_MERCHANT_ID=$MERCHANT_ID
 ZARINPAL_SANDBOX=false
 ADMIN_USER_ID=$ADMIN_ID
 SUPPORT_GROUP_ID=$SUPPORT_GROUP
-BACKUP_ENABLED=true
-BACKUP_FREQUENCY=daily
-BACKUP_RETENTION_DAYS=7
+WEBHOOK_URL=$WEBHOOK_URL/webhook
+WEBHOOK_PORT=8443
 EOL
 
-echo -e "${GREEN}Environment variables set successfully!${NC}"
+# Configure Nginx
+echo -e "${GREEN}Configuring Nginx...${NC}"
+cat > /etc/nginx/sites-available/directadmin-bot << EOL
+server {
+    listen 443 ssl;
+    server_name $WEBHOOK_URL;
 
-# Set up webhook
-echo -e "${GREEN}Setting up webhook...${NC}"
-read -p "Enter your domain for webhook (e.g., https://example.com): " WEBHOOK_URL
+    ssl_certificate /etc/letsencrypt/live/$WEBHOOK_URL/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$WEBHOOK_URL/privkey.pem;
+
+    location /webhook {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOL
+
+# Enable site and get SSL certificate
+ln -s /etc/nginx/sites-available/directadmin-bot /etc/nginx/sites-enabled/
+certbot --nginx -d $WEBHOOK_URL --non-interactive --agree-tos --email admin@$WEBHOOK_URL
+nginx -t && systemctl restart nginx
 
 # Create systemd service
 echo -e "${GREEN}Creating systemd service...${NC}"
-sudo tee /etc/systemd/system/directadmin-tgbot.service << EOL
+cat > /etc/systemd/system/directadmin-bot.service << EOL
 [Unit]
 Description=DirectAdmin Telegram Bot
 After=network.target
 
 [Service]
 Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-Environment=PATH=$(pwd)/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=$(pwd)/venv/bin/python bot.py
+User=$SUDO_USER
+WorkingDirectory=/var/www/DirectAdmin-Sell-Telegram-Bot
+Environment=PATH=/var/www/DirectAdmin-Sell-Telegram-Bot/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/var/www/DirectAdmin-Sell-Telegram-Bot/venv/bin/python bot.py
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
-# Reload systemd and start service
-sudo systemctl daemon-reload
-sudo systemctl enable directadmin-tgbot
-sudo systemctl start directadmin-tgbot
+# Setup firewall
+echo -e "${GREEN}Configuring firewall...${NC}"
+ufw allow 80
+ufw allow 443
+ufw --force enable
+
+# Start and enable service
+systemctl daemon-reload
+systemctl enable directadmin-bot
+systemctl start directadmin-bot
 
 echo -e "${GREEN}Installation completed!${NC}"
 echo -e "${BLUE}The bot is now running as a system service.${NC}"
-echo -e "${BLUE}You can check the status using: sudo systemctl status directadmin-tgbot${NC}"
+echo -e "${BLUE}You can check the status using: systemctl status directadmin-bot${NC}"
+echo -e "${BLUE}View logs using: journalctl -u directadmin-bot -f${NC}"
+
+# Show service status
+systemctl status directadmin-bot
